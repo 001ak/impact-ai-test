@@ -47,6 +47,17 @@ public class DependencyGraph {
         }
     }
 
+    public List<String> getNeighborIds(String nodeId) {
+        GraphNode node = nodeMap.get(nodeId);
+        if (node == null) return Collections.emptyList();
+        List<String> neighbors = new ArrayList<>();
+        for (GraphNode neighbor : node.getNeighbors()) {
+            neighbors.add(neighbor.getId());
+        }
+        return neighbors;
+    }
+
+
     public GraphNode getNode(String id) { return nodeMap.get(id); }
 
     public List<String> traceDownstreamImpacts(String nodeId) {

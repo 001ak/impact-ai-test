@@ -8,11 +8,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RepoMetadataService {
     private final ConcurrentHashMap<String, RepoMetadata> repoMap = new ConcurrentHashMap<>();
 
-    public boolean isRepoFullyParsed(String repoFullName) {
-        RepoMetadata metadata = repoMap.get(repoFullName);
-        return metadata != null && metadata.isFullyParsed();
-    }
-
     public void markRepoAsFullyParsed(String repoFullName, String commitSha) {
         RepoMetadata metadata = repoMap.getOrDefault(repoFullName, new RepoMetadata());
         metadata.setRepoFullName(repoFullName);
@@ -20,6 +15,11 @@ public class RepoMetadataService {
         metadata.setLastParsedCommitSha(commitSha);
         metadata.setLastParsedTimestamp(System.currentTimeMillis());
         repoMap.put(repoFullName, metadata);
+    }
+
+    public boolean isRepoFullyParsed(String repoFullName) {
+        RepoMetadata metadata = repoMap.get(repoFullName);
+        return metadata != null && metadata.isFullyParsed();
     }
 
     public RepoMetadata getMetadata(String repoFullName) {

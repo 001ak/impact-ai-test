@@ -1,7 +1,7 @@
 package com.impactai.impactai.model;
 
 public class RepoMetadata {
-    private String repoFullName; // e.g., "001ak/impact-ai-test"
+    private String repoFullName;
     private boolean isFullyParsed;
     private String lastParsedCommitSha;
     private long lastParsedTimestamp;

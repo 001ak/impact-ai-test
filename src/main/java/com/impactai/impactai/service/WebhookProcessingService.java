@@ -3,6 +3,7 @@ package com.impactai.impactai.service;
 import com.impactai.impactai.model.LineRange;
 import com.impactai.impactai.model.PRChangeInfo;
 import com.impactai.impactai.parser.ParsedDependencyNode;
+import com.impactai.impactai.util.ChangeAnalyzer;
 import com.impactai.impactai.util.GraphUtils;
 import com.impactai.impactai.util.PatchParser;
 import org.slf4j.Logger;
@@ -80,6 +81,7 @@ public class WebhookProcessingService {
 
     /**
      * Process PR webhook asynchronously - incremental parsing with line-level detection
+     * and sophisticated risk calculation
      */
     @Async("webhookExecutor")
     public void processPRAsync(String owner, String repoName, String repoFullName,
@@ -180,10 +182,61 @@ public class WebhookProcessingService {
                 ImpactAnalysisService.ImpactReport impactReport = impactAnalysisService.analyzeImpact(
                         graphBuilderService.getGraph(), changedNodeIds);
 
+                // ===== STEP 5A: Analyze patches for comment-only changes =====
+                logger.debug("[ASYNC] Analyzing patches for comment-only changes...");
+                boolean isCommentOnlyOverall = true;
+                for (PRChangeInfo changeInfo : changedFiles) {
+                    try {
+                        String patch = changeInfo.getPatch();
+                        if (patch != null && !ChangeAnalyzer.isCommentOnly(patch)) {
+                            isCommentOnlyOverall = false;
+                            logger.debug("[ASYNC] File has logic changes: {}", changeInfo.getFilePath());
+                            break;
+                        }
+                    } catch (Exception e) {
+                        logger.debug("[ASYNC] Error analyzing patch: {}", e.getMessage());
+                    }
+                }
+
+                if (isCommentOnlyOverall) {
+                    logger.info("[ASYNC] ✓ All changes are comment-only");
+                    impactReport.setHasCommentOnlyChanges(true);
+                }
+
+                // ===== STEP 5B: Check for critical methods in changed nodes =====
+                logger.debug("[ASYNC] Checking for critical methods in changed nodes...");
+                boolean hasCriticalMethods = false;
+                for (String changedNodeId : changedNodeIds) {
+                    try {
+                        List<String> annotations = impactReport.getNodeAnnotations()
+                                .getOrDefault(changedNodeId, new ArrayList<>());
+                        for (String annotation : annotations) {
+                            if (isCriticalAnnotation(annotation)) {
+                                hasCriticalMethods = true;
+                                logger.info("[ASYNC] ✓ Critical annotation found in {}: {}",
+                                        changedNodeId, annotation);
+                                break;
+                            }
+                        }
+                        if (hasCriticalMethods) break;
+                    } catch (Exception e) {
+                        logger.debug("[ASYNC] Error checking annotations: {}", e.getMessage());
+                    }
+                }
+
+                if (hasCriticalMethods) {
+                    impactReport.setHasCriticalMethodChanges(true);
+                }
+
+                // ===== STEP 5C: Calculate risk with enhanced logic =====
+                logger.debug("[ASYNC] Calculating risk score...");
                 String risk = impactAnalysisService.calculateRisk(impactReport);
+
+                // ===== STEP 6: Format comment =====
+                logger.debug("[ASYNC] Formatting impact report comment...");
                 String comment = impactReportFormatter.formatComment(impactReport, risk);
 
-                // ===== STEP 6: Print summary to console/logs =====
+                // ===== STEP 7: Print summary to console/logs =====
                 logger.info("\n[ASYNC] ========= IMPACT ANALYSIS RESULT =========");
                 logger.info("[ASYNC] PR #{} for {}", prNumber, repoFullName);
                 logger.info("[ASYNC] Changed Nodes:");
@@ -202,10 +255,12 @@ public class WebhookProcessingService {
                     logger.info("[ASYNC]   (none)");
                 }
                 logger.info("[ASYNC] Impact Depth: {}", impactReport.getImpactDepth());
+                logger.info("[ASYNC] Comment-only Changes: {}", impactReport.hasCommentOnlyChanges());
+                logger.info("[ASYNC] Critical Methods: {}", impactReport.hasCriticalMethodChanges());
                 logger.info("[ASYNC] Risk Score: {}", risk);
                 logger.info("[ASYNC] ==========================================\n");
 
-                // ===== STEP 7: Post comment to GitHub PR =====
+                // ===== STEP 8: Post comment to GitHub PR =====
                 if (action != null && List.of("opened", "reopened", "synchronize").contains(action)) {
                     try {
                         logger.debug("[ASYNC] Posting impact analysis comment to PR#{}", prNumber);
@@ -222,5 +277,34 @@ public class WebhookProcessingService {
         } catch (Exception e) {
             logger.error("[ASYNC] Error processing PR webhook for {}: {}", repoFullName, e.getMessage(), e);
         }
+    }
+
+    /**
+     * Check if annotation indicates a critical method
+     */
+    private boolean isCriticalAnnotation(String annotation) {
+        String[] criticalAnnotations = {
+                "Transactional",
+                "CacheEvict",
+                "Cacheable",
+                "CachePut",
+                "Scheduled",
+                "Async",
+                "EventListener",
+                "PreAuthorize",
+                "Secured",
+                "RolesAllowed",
+                "PostMapping",
+                "PutMapping",
+                "DeleteMapping",
+                "PatchMapping"
+        };
+
+        for (String critical : criticalAnnotations) {
+            if (annotation.contains(critical)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

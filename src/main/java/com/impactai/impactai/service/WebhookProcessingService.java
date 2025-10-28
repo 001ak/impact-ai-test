@@ -1,7 +1,12 @@
 package com.impactai.impactai.service;
 
+import com.impactai.impactai.model.LineRange;
 import com.impactai.impactai.model.PRChangeInfo;
 import com.impactai.impactai.parser.ParsedDependencyNode;
+import com.impactai.impactai.util.GraphUtils;
+import com.impactai.impactai.util.PatchParser;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -9,12 +14,13 @@ import org.springframework.stereotype.Service;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import static com.impactai.impactai.util.GraphUtils.extractChangedNodeIdsFromPR;
 
 @Service
 public class WebhookProcessingService {
+
+    private static final Logger logger = LoggerFactory.getLogger(WebhookProcessingService.class);
 
     @Autowired
     private GitHubPRFileFetcherService prFileFetcher;
@@ -41,21 +47,22 @@ public class WebhookProcessingService {
     private GitHubCommentService gitHubCommentService;
 
     /**
-     * Process ping event asynchronously
+     * Process ping event asynchronously - builds baseline
      */
     @Async("webhookExecutor")
     public void processPingAsync(String owner, String repoName, String repoFullName,
                                  String defaultBranch, String repoLocalPath) {
         try {
-            System.out.println("[ASYNC] Starting baseline setup for: " + repoFullName);
+            logger.info("[ASYNC] Starting baseline setup for: {}", repoFullName);
 
-            // Check if already parsed (in case of re-ping)
+            // Check if already parsed
             if (repoMetadataService.isRepoFullyParsed(repoFullName)) {
-                System.out.println("[ASYNC] Repo already has baseline, skipping.");
+                logger.info("[ASYNC] Repo already has baseline, skipping.");
                 return;
             }
 
             // Parse entire repo to build baseline graph
+            logger.debug("[ASYNC] Parsing full repository from: {}", repoLocalPath);
             List<ParsedDependencyNode> allParsedNodes = repoParserService.parseFullRepo(repoLocalPath);
 
             // Build and store baseline graph
@@ -64,33 +71,32 @@ public class WebhookProcessingService {
             // Mark as ready
             repoMetadataService.markRepoAsFullyParsed(repoFullName, "ping-" + System.currentTimeMillis());
 
-            System.out.println("[ASYNC] ✓ Baseline complete! Parsed " + allParsedNodes.size() + " nodes for " + repoFullName);
+            logger.info("[ASYNC] ✓ Baseline complete! Parsed {} nodes for {}", allParsedNodes.size(), repoFullName);
 
         } catch (Exception e) {
-            System.err.println("[ASYNC] Error during ping baseline setup: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("[ASYNC] Error during ping baseline setup for {}: {}", repoFullName, e.getMessage(), e);
         }
     }
 
     /**
-     * Process PR webhook asynchronously
+     * Process PR webhook asynchronously - incremental parsing with line-level detection
      */
     @Async("webhookExecutor")
     public void processPRAsync(String owner, String repoName, String repoFullName,
                                String defaultBranch, int prNumber, String headSha,
                                String action, String repoLocalPath) {
         try {
-            System.out.println("[ASYNC] Starting PR processing for: " + repoFullName + " PR#" + prNumber);
+            logger.info("[ASYNC] Starting PR processing for: {} PR#{}", repoFullName, prNumber);
 
             List<ParsedDependencyNode> allParsedNodes;
 
             // Check if baseline exists
             if (!repoMetadataService.isRepoFullyParsed(repoFullName)) {
-                System.out.println("[ASYNC] === NO BASELINE FOUND: PERFORMING FULL SCAN ===");
+                logger.info("[ASYNC] === NO BASELINE FOUND: PERFORMING FULL SCAN ===");
 
                 // Parse entire repo to build baseline
                 allParsedNodes = repoParserService.parseFullRepo(repoLocalPath);
-                System.out.println("[ASYNC] Full scan complete. Parsed " + allParsedNodes.size() + " nodes.");
+                logger.info("[ASYNC] Full scan complete. Parsed {} nodes.", allParsedNodes.size());
 
                 // Build baseline graph
                 graphBuilderService.build(allParsedNodes);
@@ -98,71 +104,123 @@ public class WebhookProcessingService {
                 // Mark repo as scanned
                 repoMetadataService.markRepoAsFullyParsed(repoFullName, headSha);
 
-                System.out.println("[ASYNC] ✓ Baseline initialized for " + repoFullName);
+                logger.info("[ASYNC] ✓ Baseline initialized for {}", repoFullName);
                 return;  // Skip impact analysis for baseline creation
 
             } else {
-                System.out.println("[ASYNC] === INCREMENTAL PARSING (PR DIFF ONLY) ===");
+                logger.info("[ASYNC] === INCREMENTAL PARSING (PR DIFF ONLY) ===");
 
-                // Fetch changed files for this PR
+                // Fetch changed files for this PR (includes patch data)
+                logger.debug("[ASYNC] Fetching changed files for PR#{}", prNumber);
                 List<PRChangeInfo> changedFiles = prFileFetcher.fetchChangedFiles(owner, repoName, prNumber);
 
-                // Convert GitHub relative paths to absolute local paths
+                if (changedFiles == null || changedFiles.isEmpty()) {
+                    logger.warn("[ASYNC] No changed files found for PR#{}", prNumber);
+                    return;
+                }
+
+                logger.info("[ASYNC] Found {} changed files", changedFiles.size());
+
+                // ===== STEP 1: Parse patches and extract line ranges =====
+                logger.debug("[ASYNC] Parsing patches to extract changed line ranges...");
+                for (PRChangeInfo changeInfo : changedFiles) {
+                    try {
+                        String patch = changeInfo.getPatch();
+                        if (patch != null && !patch.isEmpty()) {
+                            // Extract line ranges from unified diff
+                            List<LineRange> changedLines = PatchParser.extractChangedLineRanges(patch);
+                            changeInfo.setChangedLines(changedLines);
+
+                            logger.debug("[ASYNC] File {}: extracted {} line ranges",
+                                    changeInfo.getFilePath(), changedLines.size());
+                        } else {
+                            logger.warn("[ASYNC] No patch data for file: {} (changeType: {})",
+                                    changeInfo.getFilePath(), changeInfo.getChangeType());
+                        }
+                    } catch (Exception e) {
+                        logger.error("[ASYNC] Error parsing patch for {}: {}",
+                                changeInfo.getFilePath(), e.getMessage());
+                    }
+                }
+
+                // ===== STEP 2: Parse changed files =====
+                logger.debug("[ASYNC] Parsing changed files...");
                 List<String> absolutePaths = new ArrayList<>();
                 for (PRChangeInfo info : changedFiles) {
                     if (info.getFilePath().endsWith(".java")) {
                         String absolutePath = repoLocalPath + File.separator + info.getFilePath();
                         absolutePaths.add(absolutePath);
-                        System.out.println("[ASYNC] Mapped: " + info.getFilePath() + " -> " + absolutePath);
+                        logger.debug("[ASYNC] Mapped: {} -> {}", info.getFilePath(), absolutePath);
                     }
                 }
 
-                // Parse only changed files
                 allParsedNodes = dependencyParserService.parseChangedFiles(absolutePaths);
-                System.out.println("[ASYNC] Incremental parse complete. Parsed " + allParsedNodes.size() + " nodes.");
+                logger.info("[ASYNC] Incremental parse complete. Parsed {} nodes.", allParsedNodes.size());
 
-                // Build/update in-memory dependency graph
+                // ===== STEP 3: Build/update in-memory dependency graph =====
+                logger.debug("[ASYNC] Building/updating dependency graph...");
                 graphBuilderService.build(allParsedNodes);
 
-                // Extract changed node IDs
+                // ===== STEP 4: Extract changed node IDs (with LINE-LEVEL PRECISION) =====
+                logger.debug("[ASYNC] Extracting changed node IDs with line-level detection...");
                 List<String> changedNodeIds = extractChangedNodeIdsFromPR(changedFiles, allParsedNodes);
 
-                // Run impact analysis
+                if (changedNodeIds.isEmpty()) {
+                    logger.warn("[ASYNC] No changed nodes detected for PR#{}", prNumber);
+                    return;
+                }
+
+                logger.info("[ASYNC] Identified {} changed nodes", changedNodeIds.size());
+                for (String nodeId : changedNodeIds) {
+                    logger.debug("[ASYNC]   - {}", nodeId);
+                }
+
+                // ===== STEP 5: Run impact analysis =====
+                logger.debug("[ASYNC] Running impact analysis...");
                 ImpactAnalysisService.ImpactReport impactReport = impactAnalysisService.analyzeImpact(
                         graphBuilderService.getGraph(), changedNodeIds);
+
                 String risk = impactAnalysisService.calculateRisk(impactReport);
                 String comment = impactReportFormatter.formatComment(impactReport, risk);
 
-                // Print summary
-                System.out.println("\n[ASYNC] ========= IMPACT ANALYSIS RESULT =========");
-                System.out.println("[ASYNC] PR #" + prNumber + " - Changed Nodes:");
+                // ===== STEP 6: Print summary to console/logs =====
+                logger.info("\n[ASYNC] ========= IMPACT ANALYSIS RESULT =========");
+                logger.info("[ASYNC] PR #{} for {}", prNumber, repoFullName);
+                logger.info("[ASYNC] Changed Nodes:");
                 for (String changed : impactReport.getChangedNodes()) {
-                    System.out.println("[ASYNC]   [Changed] " + changed);
+                    logger.info("[ASYNC]   [Changed] {}", changed);
                 }
-                System.out.println("[ASYNC] Impacted (Class & Methods, incl. transitive):");
+                logger.info("[ASYNC] Impacted Nodes (transitive):");
+                int impactedCount = 0;
                 for (String impacted : impactReport.getAllImpactedNodes()) {
                     if (!impactReport.getChangedNodes().contains(impacted)) {
-                        System.out.println("[ASYNC]   [Impacted] " + impacted);
+                        logger.info("[ASYNC]   [Impacted] {}", impacted);
+                        impactedCount++;
                     }
                 }
-                System.out.println("[ASYNC] Maximum Impact Depth: " + impactReport.getImpactDepth());
-                System.out.println("[ASYNC] Risk Score: " + risk);
-                System.out.println("[ASYNC] ==========================================\n");
+                if (impactedCount == 0) {
+                    logger.info("[ASYNC]   (none)");
+                }
+                logger.info("[ASYNC] Impact Depth: {}", impactReport.getImpactDepth());
+                logger.info("[ASYNC] Risk Score: {}", risk);
+                logger.info("[ASYNC] ==========================================\n");
 
-                // Post comment for relevant actions
+                // ===== STEP 7: Post comment to GitHub PR =====
                 if (action != null && List.of("opened", "reopened", "synchronize").contains(action)) {
                     try {
+                        logger.debug("[ASYNC] Posting impact analysis comment to PR#{}", prNumber);
                         gitHubCommentService.postComment(owner, repoName, prNumber, comment);
-                        System.out.println("[ASYNC] ✓ Posted impact analysis comment to PR #" + prNumber);
+                        logger.info("[ASYNC] ✓ Posted impact analysis comment to PR#{}", prNumber);
                     } catch (Exception e) {
-                        System.err.println("[ASYNC] Failed to post comment: " + e.getMessage());
+                        logger.error("[ASYNC] Failed to post comment to PR#{}: {}", prNumber, e.getMessage());
                     }
+                } else {
+                    logger.debug("[ASYNC] Skipping comment post (action: {}, PR action not in post list)", action);
                 }
             }
 
         } catch (Exception e) {
-            System.err.println("[ASYNC] Error processing PR webhook: " + e.getMessage());
-            e.printStackTrace();
+            logger.error("[ASYNC] Error processing PR webhook for {}: {}", repoFullName, e.getMessage(), e);
         }
     }
 }

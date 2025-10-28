@@ -3,6 +3,8 @@ package com.impactai.impactai.controller;
 import com.impactai.impactai.service.*;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -15,6 +17,7 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/webhook")
 public class WebhookController {
+    private static final Logger logger = LoggerFactory.getLogger(WebhookController.class);
 
     @Autowired
     private WebhookProcessingService webhookProcessingService;
@@ -28,6 +31,7 @@ public class WebhookController {
     /**
      * Main webhook endpoint - returns immediately, processes async
      */
+//    TODO: Handle closed PR skipping
     @PostMapping("/pr")
     public ResponseEntity<?> handleWebhook(@RequestBody Map<String, Object> payload) {
 

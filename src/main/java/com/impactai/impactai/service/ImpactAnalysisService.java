@@ -1,11 +1,15 @@
 package com.impactai.impactai.service;
 
 import com.impactai.impactai.graph.DependencyGraph;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import java.util.*;
 
 @Service
 public class ImpactAnalysisService {
+    private static final Logger logger = LoggerFactory.getLogger(ImpactAnalysisService.class);
+
 
     // Traverse the graph and return all impacted nodes for a list of changed classes/methods
     public ImpactReport analyzeImpact(DependencyGraph graph, List<String> changedNodeIds) {

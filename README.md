@@ -92,6 +92,7 @@ Computes risk based on:
 
 ### High-Level Architecture
 
+![impact-ai-arch](impact-ai-arch.jpg)
 -----------------------------
 
 

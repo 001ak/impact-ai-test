@@ -47,6 +47,10 @@ public class WebhookProcessingService {
     @Autowired
     private GitHubCommentService gitHubCommentService;
 
+    @Autowired
+    private GitHubStatusService gitHubStatusService;
+
+
     /**
      * Process ping event asynchronously - builds baseline
      */
@@ -74,6 +78,12 @@ public class WebhookProcessingService {
 
             logger.info("[ASYNC] ✓ Baseline complete! Parsed {} nodes for {}", allParsedNodes.size(), repoFullName);
 
+            // Print an easy-to-read summary to the console
+            graphBuilderService.getGraph().printGraphSummary();
+            // Export the graph as JSON for analysis/visualization
+            graphBuilderService.getGraph().exportJson("impact-graph.json");
+
+
         } catch (Exception e) {
             logger.error("[ASYNC] Error during ping baseline setup for {}: {}", repoFullName, e.getMessage(), e);
         }
@@ -89,6 +99,16 @@ public class WebhookProcessingService {
                                String action, String repoLocalPath) {
         try {
             logger.info("[ASYNC] Starting PR processing for: {} PR#{}", repoFullName, prNumber);
+
+            // --------- SET STATUS TO PENDING IMMEDIATELY ----------
+            gitHubStatusService.setStatus(
+                    owner,
+                    repoName,
+                    headSha,
+                    "pending",
+                    "Impact analysis in progress...",
+                    "Impact-AI Risk"
+            );
 
             List<ParsedDependencyNode> allParsedNodes;
 
@@ -235,6 +255,21 @@ public class WebhookProcessingService {
                 // ===== STEP 6: Format comment =====
                 logger.debug("[ASYNC] Formatting impact report comment...");
                 String comment = impactReportFormatter.formatComment(impactReport, risk);
+
+                // --------- SET STATUS TO SUCCESS/FAILURE ----------
+                String state = (risk.equalsIgnoreCase("HIGH") || risk.equalsIgnoreCase("CRITICAL"))
+                        ? "failure"
+                        : "success";
+                String statusDescription = "Impact-AI Risk: " + risk.toUpperCase() +
+                        (state.equals("failure") ? " – Do NOT merge!" : " – Safe to merge.");
+                gitHubStatusService.setStatus(
+                        owner,
+                        repoName,
+                        headSha,
+                        state,
+                        statusDescription,
+                        "Impact-AI Risk"
+                );
 
                 // ===== STEP 7: Print summary to console/logs =====
                 logger.info("\n[ASYNC] ========= IMPACT ANALYSIS RESULT =========");

@@ -30,6 +30,7 @@ dependencies {
 	implementation 'com.fasterxml.jackson.core:jackson-databind'
 	implementation 'fr.inria.gforge.spoon:spoon-core:11.2.1'
 	implementation 'org.eclipse.jgit:org.eclipse.jgit:6.7.0.202309050840-r'
+	implementation 'org.json:json:20231013'  // or updated version
 
 	// Use Spring Boot's built-in logging (cleaner, no conflicts)
 	implementation 'org.springframework.boot:spring-boot-starter-logging'
